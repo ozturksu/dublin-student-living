@@ -9,6 +9,10 @@ import plotly.express as px
 import streamlit as st
 from sqlalchemy import create_engine
 
+HOUSING_CSV = "data/raw/daft_listings.csv"
+FOOD_CSV = "data/raw/food_prices_aldi_tesco_fast.csv"
+AMENITIES_CSV = "data/raw/dublin_amenities.csv"
+
 st.set_page_config(
     page_title="Dublin Student Living Dashboard",
     page_icon="🏠",
@@ -26,10 +30,46 @@ engine = create_engine(PG_URL, pool_pre_ping=True)
 
 @st.cache_data
 def load_data():
-    colleges = pd.read_csv("data/colleges.csv")  # whatever you already had
-    df_housing = pd.read_sql("SELECT * FROM daft_listings", engine)
-    df_food = pd.read_sql("SELECT * FROM food_prices", engine)
-    df_amenities = pd.read_sql("SELECT * FROM amenities", engine)
+    engine = get_engine()
+
+    colleges = {
+        "Trinity College Dublin": {"lat": 53.3438, "lon": -6.2546},
+        "UCD (Belfield)": {"lat": 53.3070, "lon": -6.2239},
+        "DCU (Glasnevin)": {"lat": 53.3850, "lon": -6.2568},
+        "TU Dublin (Grangegorman)": {"lat": 53.3550, "lon": -6.2784},
+        "NCI (IFSC)": {"lat": 53.3486, "lon": -6.2428},
+    }
+
+
+    try:
+        if engine is not None:
+            df_housing = pd.read_sql("SELECT * FROM daft_listings", engine)
+        else:
+            raise RuntimeError("No DB engine")
+    except Exception as e:
+        print(f"Falling back to CSV for daft_listings: {e}")
+        df_housing = pd.read_csv(HOUSING_CSV)
+
+    # ---- Food prices ----
+    try:
+        if engine is not None:
+            df_food = pd.read_sql("SELECT * FROM food_prices", engine)
+        else:
+            raise RuntimeError("No DB engine")
+    except Exception as e:
+        print(f"Falling back to CSV for food_prices: {e}")
+        df_food = pd.read_csv(FOOD_CSV)
+
+    # ---- Amenities ----
+    try:
+        if engine is not None:
+            df_amenities = pd.read_sql("SELECT * FROM amenities", engine)
+        else:
+            raise RuntimeError("No DB engine")
+    except Exception as e:
+        print(f"Falling back to CSV for amenities: {e}")
+        df_amenities = pd.read_csv(AMENITIES_CSV)
+
     return colleges, df_housing, df_food, df_amenities
 
 try:
