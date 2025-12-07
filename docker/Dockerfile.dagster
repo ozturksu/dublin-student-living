@@ -19,4 +19,6 @@ COPY orchestration /app/orchestration
 
 ENV PYTHONPATH=/app
 
-CMD ["dagster", "dev", "-m", "orchestration", "-h", "0.0.0.0", "-p", "3000"]
+# docker/Dockerfile.dagster  (only the CMD line needs to change)
+
+CMD ["dagster", "dev", "-m", "orchestration.pipeline", "-h", "0.0.0.0", "-p", "3000"]

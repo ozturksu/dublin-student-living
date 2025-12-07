@@ -10,7 +10,7 @@ from dagster import (
     ScheduleDefinition,
 )
 
-# Paths **inside the containers** (both Dagster & Streamlit)
+# Paths inside **containers** (Dagster + Streamlit)
 DATA_ROOT = Path("/app/data/raw")
 
 HOUSING_CSV = DATA_ROOT / "daft_listings.csv"
@@ -18,7 +18,7 @@ FOOD_CSV = DATA_ROOT / "food_prices_aldi_tesco_fast.csv"
 AMENITIES_CSV = DATA_ROOT / "dublin_amenities.csv"
 
 
-# ---------------- Assets ----------------
+# ---------------- ASSETS ----------------
 
 @asset(description="Raw Daft listings from CSV")
 def daft_listings_csv() -> pd.DataFrame:
@@ -35,7 +35,7 @@ def amenities_csv() -> pd.DataFrame:
     return pd.read_csv(AMENITIES_CSV)
 
 
-# ---------------- Job & schedule ----------------
+# ---------------- JOB + SCHEDULE ----------------
 
 daily_refresh_job = define_asset_job(
     name="daily_refresh_job",
@@ -48,7 +48,7 @@ daily_refresh_schedule = ScheduleDefinition(
 )
 
 
-# ---------------- Definitions (THIS IS WHAT DAGSTER NEEDS) ----------------
+# ---------------- DEFINITIONS (THIS is what Dagster needs) ----------------
 
 defs = Definitions(
     assets=[daft_listings_csv, food_prices_csv, amenities_csv],
