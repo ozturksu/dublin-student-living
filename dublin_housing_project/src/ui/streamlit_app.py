@@ -1,18 +1,24 @@
 import re
 import os
 
-
 import numpy as np
 import pandas as pd
 
 import plotly.express as px
 import streamlit as st
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 
+# ------------------------------------------------------------------
+# Paths to CSV fallbacks (these are in your repo: data/raw/*.csv)
+# ------------------------------------------------------------------
 HOUSING_CSV = "data/raw/daft_listings.csv"
 FOOD_CSV = "data/raw/food_prices_aldi_tesco_fast.csv"
 AMENITIES_CSV = "data/raw/dublin_amenities.csv"
 
+# ------------------------------------------------------------------
+# Streamlit page config
+# ------------------------------------------------------------------
 st.set_page_config(
     page_title="Dublin Student Living Dashboard",
     page_icon="🏠",
@@ -20,58 +26,24 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ------------------------------------------------------------------
+# Database connection (optional on Streamlit Cloud)
+# ------------------------------------------------------------------
+# On your laptop / Docker:
+#   export PG_URL="postgresql+psycopg2://postgres:postgres@localhost:15432/dublin_housing"
+#
+# On Streamlit Cloud:
+#   Add PG_URL as a secret, pointing to a **remote** Postgres (if you use one).
+PG_URL = os.getenv("PG_URL")  # no default for Cloud
 
-PG_URL = os.getenv(
-    "PG_URL",
-    "postgresql+psycopg2://postgres:postgres@localhost:15432/dublin_housing",
-)
+if PG_URL:
+    engine = create_engine(PG_URL, pool_pre_ping=True)
+else:
+    engine = None
 
-engine = create_engine(PG_URL, pool_pre_ping=True)
-
-@st.cache_data
-def load_data():
-    engine = get_engine()
-
-    colleges = {
-        "Trinity College Dublin": {"lat": 53.3438, "lon": -6.2546},
-        "UCD (Belfield)": {"lat": 53.3070, "lon": -6.2239},
-        "DCU (Glasnevin)": {"lat": 53.3850, "lon": -6.2568},
-        "TU Dublin (Grangegorman)": {"lat": 53.3550, "lon": -6.2784},
-        "NCI (IFSC)": {"lat": 53.3486, "lon": -6.2428},
-    }
-
-
-    try:
-        if engine is not None:
-            df_housing = pd.read_sql("SELECT * FROM daft_listings", engine)
-        else:
-            raise RuntimeError("No DB engine")
-    except Exception as e:
-        print(f"Falling back to CSV for daft_listings: {e}")
-        df_housing = pd.read_csv(HOUSING_CSV)
-
-    # ---- Food prices ----
-    try:
-        if engine is not None:
-            df_food = pd.read_sql("SELECT * FROM food_prices", engine)
-        else:
-            raise RuntimeError("No DB engine")
-    except Exception as e:
-        print(f"Falling back to CSV for food_prices: {e}")
-        df_food = pd.read_csv(FOOD_CSV)
-
-    # ---- Amenities ----
-    try:
-        if engine is not None:
-            df_amenities = pd.read_sql("SELECT * FROM amenities", engine)
-        else:
-            raise RuntimeError("No DB engine")
-    except Exception as e:
-        print(f"Falling back to CSV for amenities: {e}")
-        df_amenities = pd.read_csv(AMENITIES_CSV)
-
-    return colleges, df_housing, df_food, df_amenities
-
+# ------------------------------------------------------------------
+# Mapbox token (optional)
+# ------------------------------------------------------------------
 try:
     MAPBOX_TOKEN = st.secrets.get("mapbox_token", None)
 except Exception:
@@ -81,9 +53,12 @@ if MAPBOX_TOKEN:
     px.set_mapbox_access_token(MAPBOX_TOKEN)
     MAP_STYLE = "mapbox://styles/mapbox/light-v10"
 else:
-    MAP_STYLE = "carto-positron"
+    MAP_STYLE = "carto-positron"  # open tile style (no token needed)
 
 
+# ------------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------------
 def convert_to_monthly(price_text, numeric_price):
     s = str(price_text).lower()
     m = re.search(r"(\d[\d,\.]*)", s)
@@ -107,7 +82,16 @@ def convert_to_monthly(price_text, numeric_price):
 
 
 def fig_downloads(fig, label):
-    png = fig.to_image(format="png", scale=2)
+    """
+    Try to offer PNG/PDF downloads, but fail silently if Kaleido/Chrome
+    aren't available (e.g. on Streamlit Cloud).
+    """
+    try:
+        png = fig.to_image(format="png", scale=2)
+    except Exception:
+        # No Kaleido or Chrome → just show the chart, no buttons
+        return
+
     c1, c2 = st.columns(2)
     with c1:
         st.download_button(
@@ -116,6 +100,7 @@ def fig_downloads(fig, label):
             file_name=f"{label}.png",
             mime="image/png",
         )
+
     try:
         pdf = fig.to_image(format="pdf")
         with c2:
@@ -396,6 +381,9 @@ def build_basket(df):
     return pd.DataFrame(rows).sort_values("item").reset_index(drop=True)
 
 
+# ------------------------------------------------------------------
+# LOAD DATA (DB first, CSV fallback)
+# ------------------------------------------------------------------
 @st.cache_data
 def load_data():
     colleges = {
@@ -406,7 +394,24 @@ def load_data():
         "NCI (IFSC)": {"lat": 53.3486, "lon": -6.2428},
     }
 
-    df_housing = pd.read_sql("select * from daft_listings", engine)
+    df_housing = None
+    df_food_raw = None
+    df_amenities = None
+
+    # 1) Try Postgres if PG_URL is set
+    if engine is not None:
+        try:
+            df_housing = pd.read_sql("select * from daft_listings", engine)
+            df_food_raw = pd.read_sql("select * from food_prices", engine)
+            df_amenities = pd.read_sql("select * from amenities", engine)
+        except SQLAlchemyError as e:
+            print(f"DB connection failed, falling back to CSVs: {e}")
+            df_housing = df_food_raw = df_amenities = None
+
+    # 2) Fallback to CSVs (e.g. Streamlit Cloud)
+    if df_housing is None:
+        df_housing = pd.read_csv(HOUSING_CSV)
+
     df_housing["price_per_month"] = df_housing.apply(
         lambda r: convert_to_monthly(r.get("Price", ""), r.get("PriceNumeric", np.nan)),
         axis=1,
@@ -419,21 +424,31 @@ def load_data():
         "AreaName": "area",
         "URL": "link",
     }
-    df_housing = df_housing.rename(columns={k: v for k, v in rename_map.items() if k in df_housing.columns})
+    df_housing = df_housing.rename(
+        columns={k: v for k, v in rename_map.items() if k in df_housing.columns}
+    )
     df_housing = df_housing.dropna(subset=["lat", "lon", "price_per_month"])
-    df_housing["bedrooms"] = pd.to_numeric(df_housing["bedrooms"], errors="coerce").fillna(0)
-    df_housing["type"] = df_housing["type"].fillna("Unknown")
+    df_housing["bedrooms"] = pd.to_numeric(df_housing.get("bedrooms", 0), errors="coerce").fillna(0)
+    df_housing["type"] = df_housing.get("type", "Unknown").fillna("Unknown")
 
-    df_food_raw = pd.read_sql("select * from food_prices", engine)
+    # Food
+    if df_food_raw is None:
+        df_food_raw = pd.read_csv(FOOD_CSV)
+
     df_food_raw["retailer"] = df_food_raw["retailer"].astype(str).str.strip()
     df_food_raw["price_eur"] = pd.to_numeric(df_food_raw["price_eur"], errors="coerce")
-    df_food_raw["canonical_unit_price"] = pd.to_numeric(df_food_raw["canonical_unit_price"], errors="coerce")
+    df_food_raw["canonical_unit_price"] = pd.to_numeric(
+        df_food_raw["canonical_unit_price"], errors="coerce"
+    )
     df_food_raw["title"] = df_food_raw["title"].astype(str)
-
     df_food = build_basket(df_food_raw)
 
-    df_amenities = pd.read_sql("select * from amenities", engine)
-    df_amenities = df_amenities.rename(columns={"category": "type"})
+    # Amenities
+    if df_amenities is None:
+        df_amenities = pd.read_csv(AMENITIES_CSV)
+
+    if "category" in df_amenities.columns and "type" not in df_amenities.columns:
+        df_amenities = df_amenities.rename(columns={"category": "type"})
     df_amenities["lat"] = pd.to_numeric(df_amenities["lat"], errors="coerce")
     df_amenities["lon"] = pd.to_numeric(df_amenities["lon"], errors="coerce")
     df_amenities = df_amenities.dropna(subset=["lat", "lon"])
@@ -441,6 +456,9 @@ def load_data():
     return colleges, df_housing, df_food, df_amenities
 
 
+# ------------------------------------------------------------------
+# MAIN APP
+# ------------------------------------------------------------------
 colleges, df_housing, df_food, df_amenities = load_data()
 
 st.sidebar.header("🎓 Student preferences")
@@ -497,6 +515,7 @@ else:
 
 tab1, tab2, tab3 = st.tabs(["🗺 Map search", "📊 Rent analysis", "🛒 Living costs & neighbourhood"])
 
+# --- Tab 1: Map ---
 with tab1:
     st.subheader(f"Properties within {max_dist} km of {selected_college}")
     if not filtered_housing.empty:
@@ -532,6 +551,7 @@ with tab1:
     else:
         st.info("No properties match your filters.")
 
+# --- Tab 2: Rent analysis ---
 with tab2:
     if not filtered_housing.empty:
         col_a, col_b = st.columns(2)
@@ -585,6 +605,7 @@ with tab2:
     else:
         st.info("No housing data to analyse with current filters.")
 
+# --- Tab 3: Costs & amenities ---
 with tab3:
     st.header("Weekly living costs")
     st.markdown(
@@ -729,7 +750,7 @@ st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: grey;'>"
     "<small>Data source: PostgreSQL database 'dublin_housing' "
-    "(tables: daft_listings, food_prices, amenities)</small>"
+    "(tables: daft_listings, food_prices, amenities) or CSV fallbacks.</small>"
     "</div>",
     unsafe_allow_html=True,
 )
