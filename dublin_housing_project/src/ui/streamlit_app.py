@@ -7,7 +7,7 @@ import plotly.express as px
 import streamlit as st
 from sqlalchemy import create_engine
 
-# ---------- Paths to CSV fallbacks (work on Streamlit Cloud) ----------
+# ---------- Paths to CSV fallback data (these MUST exist in the repo) ----------
 HOUSING_CSV = "data/raw/daft_listings.csv"
 FOOD_CSV = "data/raw/food_prices_aldi_tesco_fast.csv"
 AMENITIES_CSV = "data/raw/dublin_amenities.csv"
@@ -20,79 +20,48 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ---------- Optional DB engine (for local / remote Postgres) ----------
-# On Streamlit Cloud, you normally DO NOT set PG_URL (we’ll use CSVs).
-PG_URL = st.secrets.get("PG_URL", os.getenv("PG_URL", ""))
+# ---------- Safe secrets handling (no secrets.toml = no crash) ----------
 
-_engine = None
+def safe_get_secret(key, default=None):
+    """Return st.secrets[key] if secrets exist, otherwise default."""
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+# Try: PG_URL from secrets, else environment, else empty string
+PG_URL = safe_get_secret("PG_URL", os.getenv("PG_URL", ""))
 
 
 def get_engine():
-    """Return a SQLAlchemy engine if PG_URL is set, otherwise None."""
-    global _engine
+    """Create a SQLAlchemy engine if PG_URL is set; otherwise return None."""
     if not PG_URL:
         return None
-    if _engine is None:
-        try:
-            _engine = create_engine(PG_URL, pool_pre_ping=True)
-        except Exception as e:
-            # If anything goes wrong, just disable DB and use CSVs.
-            print(f"Failed to create engine, falling back to CSVs: {e}")
-            _engine = None
-    return _engine
-
-
-# ---------- Optional image download (disabled on Cloud by default) ----------
-ENABLE_IMAGE_DOWNLOADS = False
-try:
-    ENABLE_IMAGE_DOWNLOADS = bool(st.secrets.get("enable_image_downloads", False))
-except Exception:
-    ENABLE_IMAGE_DOWNLOADS = False
-
-
-def fig_downloads(fig, label: str):
-    """
-    Add PNG/PDF download buttons if ENABLE_IMAGE_DOWNLOADS is True
-    and kaleido/Chrome are available. On Streamlit Cloud this will
-    usually be disabled to avoid errors.
-    """
-    if not ENABLE_IMAGE_DOWNLOADS:
-        return
-
     try:
-        png = fig.to_image(format="png", scale=2)
+        engine = create_engine(PG_URL, pool_pre_ping=True)
+        return engine
     except Exception as e:
-        print(f"Skipping image downloads for {label}: {e}")
-        return
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.download_button(
-            label=f"Download {label} (PNG)",
-            data=png,
-            file_name=f"{label}.png",
-            mime="image/png",
-        )
-
-    try:
-        pdf = fig.to_image(format="pdf")
-        with c2:
-            st.download_button(
-                label=f"Download {label} (PDF)",
-                data=pdf,
-                file_name=f"{label}.pdf",
-                mime="application/pdf",
-            )
-    except Exception:
-        # PDF is nice-to-have; ignore if not supported
-        pass
+        # If connection fails (e.g., no DB on Streamlit Cloud), fall back to CSV
+        print(f"[WARN] Could not create DB engine, falling back to CSV only: {e}")
+        return None
 
 
-# ---------- Utility helpers ----------
+# We'll reuse this engine in load_data, but always guard it
+ENGINE = get_engine()
 
+# Mapbox token (optional). If not set, we fall back to carto-positron.
+MAPBOX_TOKEN = safe_get_secret("mapbox_token", None)
+if MAPBOX_TOKEN:
+    px.set_mapbox_access_token(MAPBOX_TOKEN)
+    MAP_STYLE = "mapbox://styles/mapbox/light-v10"
+else:
+    MAP_STYLE = "carto-positron"
+
+
+# ---------- Utility functions ----------
 
 def convert_to_monthly(price_text, numeric_price):
-    """Convert weekly/daily/yearly rents to a monthly figure."""
+    """Convert prices like '€250 per week' to a monthly numeric value."""
     s = str(price_text).lower()
     m = re.search(r"(\d[\d,\.]*)", s)
     base = None
@@ -101,6 +70,7 @@ def convert_to_monthly(price_text, numeric_price):
             base = float(m.group(1).replace(",", ""))
         except ValueError:
             base = None
+
     if base is None and pd.notna(numeric_price):
         try:
             base = float(numeric_price)
@@ -119,7 +89,41 @@ def convert_to_monthly(price_text, numeric_price):
     return base
 
 
+def fig_downloads(fig, label: str):
+    """Add PNG/PDF download buttons for a Plotly figure."""
+    try:
+        png = fig.to_image(format="png", scale=2)
+    except Exception:
+        # If kaleido or Chrome is missing, gracefully skip downloads
+        st.info("Image export is unavailable in this environment.")
+        st.plotly_chart(fig, use_container_width=True)
+        return
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button(
+            label=f"Download {label} (PNG)",
+            data=png,
+            file_name=f"{label}.png",
+            mime="image/png",
+        )
+    try:
+        pdf = fig.to_image(format="pdf")
+        with c2:
+            st.download_button(
+                label=f"Download {label} (PDF)",
+                data=pdf,
+                file_name=f"{label}.pdf",
+                mime="application/pdf",
+            )
+    except Exception:
+        pass
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def haversine(lat1, lon1, lat2, lon2):
+    """Distance between two lat/lon points in km."""
     lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
     dlat = lat2 - lat1
     dlon = lon2 - lon1
@@ -386,13 +390,11 @@ def build_basket(df):
     return pd.DataFrame(rows).sort_values("item").reset_index(drop=True)
 
 
-# ---------- Data loading (CSV-first, DB optional) ----------
-
+# ---------- DATA LOADING (CSV-first, DB optional) ----------
 
 @st.cache_data
 def load_data():
-    engine = get_engine()
-
+    # 1) College coordinates (static)
     colleges = {
         "Trinity College Dublin": {"lat": 53.3438, "lon": -6.2546},
         "UCD (Belfield)": {"lat": 53.3070, "lon": -6.2239},
@@ -401,20 +403,18 @@ def load_data():
         "NCI (IFSC)": {"lat": 53.3486, "lon": -6.2428},
     }
 
-    def sql_or_csv(sql, csv_path):
-        if engine is not None:
-            try:
-                return pd.read_sql(sql, engine)
-            except Exception as e:
-                print(f"SQL failed for '{sql}', falling back to {csv_path}: {e}")
-        return pd.read_csv(csv_path)
+    engine = ENGINE
 
-    # Housing
-    df_housing = sql_or_csv("SELECT * FROM daft_listings", HOUSING_CSV)
-    if "Price" not in df_housing.columns:
-        df_housing["Price"] = np.nan
-    if "PriceNumeric" not in df_housing.columns:
-        df_housing["PriceNumeric"] = np.nan
+    # ---- Housing (daft_listings) ----
+    df_housing = None
+    if engine is not None:
+        try:
+            df_housing = pd.read_sql("SELECT * FROM daft_listings", engine)
+        except Exception as e:
+            print(f"[WARN] Could not read daft_listings from DB: {e}")
+
+    if df_housing is None:
+        df_housing = pd.read_csv(HOUSING_CSV)
 
     df_housing["price_per_month"] = df_housing.apply(
         lambda r: convert_to_monthly(r.get("Price", ""), r.get("PriceNumeric", np.nan)),
@@ -429,55 +429,51 @@ def load_data():
         "AreaName": "area",
         "URL": "link",
     }
-    df_housing = df_housing.rename(
-        columns={k: v for k, v in rename_map.items() if k in df_housing.columns}
-    )
-    # basic cleaning
+    df_housing = df_housing.rename(columns={k: v for k, v in rename_map.items() if k in df_housing.columns})
     df_housing = df_housing.dropna(subset=["lat", "lon", "price_per_month"])
-    df_housing["bedrooms"] = pd.to_numeric(df_housing.get("bedrooms", 0), errors="coerce").fillna(0)
-    df_housing["type"] = df_housing.get("type", "Unknown").fillna("Unknown")
-    df_housing["area"] = df_housing.get("area", "Unknown").fillna("Unknown")
+    df_housing["bedrooms"] = pd.to_numeric(df_housing["bedrooms"], errors="coerce").fillna(0)
+    df_housing["type"] = df_housing["type"].fillna("Unknown")
 
-    # Food
-    df_food_raw = sql_or_csv("SELECT * FROM food_prices", FOOD_CSV)
-    if not df_food_raw.empty:
-        df_food_raw["retailer"] = df_food_raw["retailer"].astype(str).str.strip()
-        df_food_raw["price_eur"] = pd.to_numeric(df_food_raw.get("price_eur"), errors="coerce")
-        df_food_raw["canonical_unit_price"] = pd.to_numeric(
-            df_food_raw.get("canonical_unit_price"), errors="coerce"
-        )
-        df_food_raw["title"] = df_food_raw.get("title", "").astype(str)
-        df_food = build_basket(df_food_raw)
-    else:
-        df_food = pd.DataFrame()
+    # ---- Food prices ----
+    df_food_source = None
+    if engine is not None:
+        try:
+            df_food_source = pd.read_sql("SELECT * FROM food_prices", engine)
+        except Exception as e:
+            print(f"[WARN] Could not read food_prices from DB: {e}")
 
-    # Amenities
-    df_amenities = sql_or_csv("SELECT * FROM amenities", AMENITIES_CSV)
-    if not df_amenities.empty:
-        df_amenities = df_amenities.rename(columns={"category": "type"})
-        df_amenities["lat"] = pd.to_numeric(df_amenities.get("lat"), errors="coerce")
-        df_amenities["lon"] = pd.to_numeric(df_amenities.get("lon"), errors="coerce")
-        df_amenities = df_amenities.dropna(subset=["lat", "lon"])
-    else:
-        df_amenities = pd.DataFrame(columns=["lat", "lon", "type", "name"])
+    if df_food_source is None:
+        df_food_source = pd.read_csv(FOOD_CSV)
+
+    df_food_source["retailer"] = df_food_source["retailer"].astype(str).str.strip()
+    df_food_source["price_eur"] = pd.to_numeric(df_food_source["price_eur"], errors="coerce")
+    df_food_source["canonical_unit_price"] = pd.to_numeric(
+        df_food_source["canonical_unit_price"], errors="coerce"
+    )
+    df_food_source["title"] = df_food_source["title"].astype(str)
+
+    df_food = build_basket(df_food_source)
+
+    # ---- Amenities ----
+    df_amenities = None
+    if engine is not None:
+        try:
+            df_amenities = pd.read_sql("SELECT * FROM amenities", engine)
+        except Exception as e:
+            print(f"[WARN] Could not read amenities from DB: {e}")
+
+    if df_amenities is None:
+        df_amenities = pd.read_csv(AMENITIES_CSV)
+
+    df_amenities = df_amenities.rename(columns={"category": "type"} if "category" in df_amenities.columns else {})
+    df_amenities["lat"] = pd.to_numeric(df_amenities["lat"], errors="coerce")
+    df_amenities["lon"] = pd.to_numeric(df_amenities["lon"], errors="coerce")
+    df_amenities = df_amenities.dropna(subset=["lat", "lon"])
 
     return colleges, df_housing, df_food, df_amenities
 
 
-# ---------- Mapbox / tile style ----------
-try:
-    MAPBOX_TOKEN = st.secrets.get("mapbox_token", None)
-except Exception:
-    MAPBOX_TOKEN = None
-
-if MAPBOX_TOKEN:
-    px.set_mapbox_access_token(MAPBOX_TOKEN)
-    MAP_STYLE = "mapbox://styles/mapbox/light-v10"
-else:
-    MAP_STYLE = "carto-positron"
-
-
-# ---------- Main app ----------
+# ---------- MAIN APP ----------
 
 colleges, df_housing, df_food, df_amenities = load_data()
 
@@ -496,9 +492,7 @@ df_housing["dist_km"] = df_housing.apply(
 min_price = int(df_housing["price_per_month"].min())
 max_price = int(df_housing["price_per_month"].max())
 
-max_rent = st.sidebar.slider(
-    "Max monthly rent (€)", min_price, min(max_price, 4000), 2000, step=50
-)
+max_rent = st.sidebar.slider("Max monthly rent (€)", min_price, min(max_price, 4000), 2000, step=50)
 max_dist = st.sidebar.slider("Max distance to campus (km)", 1, 30, 10)
 
 types_available = sorted(df_housing["type"].unique())
@@ -523,15 +517,11 @@ col1, col2, col3, col4 = st.columns(4)
 col1.metric("Matching properties", len(filtered_housing))
 col2.metric(
     "Avg rent (filtered)",
-    f"€{filtered_housing['price_per_month'].mean():.0f}"
-    if not filtered_housing.empty
-    else "N/A",
+    f"€{filtered_housing['price_per_month'].mean():.0f}" if not filtered_housing.empty else "N/A",
 )
 col3.metric(
     "Lowest rent",
-    f"€{filtered_housing['price_per_month'].min():.0f}"
-    if not filtered_housing.empty
-    else "N/A",
+    f"€{filtered_housing['price_per_month'].min():.0f}" if not filtered_housing.empty else "N/A",
 )
 if not df_food.empty:
     weekly_aldi = df_food["Aldi price (€)"].sum()
@@ -539,11 +529,9 @@ if not df_food.empty:
 else:
     col4.metric("Aldi weekly basket", "N/A")
 
-tab1, tab2, tab3 = st.tabs(
-    ["🗺 Map search", "📊 Rent analysis", "🛒 Living costs & neighbourhood"]
-)
+tab1, tab2, tab3 = st.tabs(["🗺 Map search", "📊 Rent analysis", "🛒 Living costs & neighbourhood"])
 
-# ----- Tab 1: Map -----
+# ----- TAB 1: MAP -----
 with tab1:
     st.subheader(f"Properties within {max_dist} km of {selected_college}")
     if not filtered_housing.empty:
@@ -557,16 +545,11 @@ with tab1:
             mapbox_style=MAP_STYLE,
             zoom=11,
             hover_name="area",
-            hover_data={
-                "price_per_month": True,
-                "link": True,
-                "dist_km": True,
-            },
+            hover_data={"price_per_month": True, "link": True, "dist_km": True},
             height=550,
         )
         fig_map.update_layout(template="plotly_white")
         fig_downloads(fig_map, "Rent_Map")
-        st.plotly_chart(fig_map, use_container_width=True)
 
         st.markdown("### Property details")
         cols = ["area", "type", "bedrooms", "price_per_month", "dist_km", "link"]
@@ -574,12 +557,8 @@ with tab1:
         st.dataframe(
             filtered_housing[cols].sort_values("price_per_month"),
             column_config={
-                "price_per_month": st.column_config.NumberColumn(
-                    "Rent (€)", format="€%d"
-                ),
-                "dist_km": st.column_config.NumberColumn(
-                    "Distance (km)", format="%.2f km"
-                ),
+                "price_per_month": st.column_config.NumberColumn("Rent (€)", format="€%d"),
+                "dist_km": st.column_config.NumberColumn("Distance (km)", format="%.2f km"),
                 "link": st.column_config.LinkColumn("Daft listing"),
             },
             use_container_width=True,
@@ -587,7 +566,7 @@ with tab1:
     else:
         st.info("No properties match your filters.")
 
-# ----- Tab 2: Rent analysis -----
+# ----- TAB 2: RENT ANALYSIS -----
 with tab2:
     if not filtered_housing.empty:
         col_a, col_b = st.columns(2)
@@ -604,7 +583,6 @@ with tab2:
             )
             fig_hist.update_layout(template="plotly_white")
             fig_downloads(fig_hist, "Rent_Distribution")
-            st.plotly_chart(fig_hist, use_container_width=True)
 
         with col_b:
             st.subheader("Average rent by area")
@@ -624,7 +602,6 @@ with tab2:
             )
             fig_area.update_layout(xaxis_tickangle=-45, template="plotly_white")
             fig_downloads(fig_area, "Average_Rent_by_Area")
-            st.plotly_chart(fig_area, use_container_width=True)
 
         st.subheader("Rent vs distance from campus")
         fig_scatter = px.scatter(
@@ -632,25 +609,20 @@ with tab2:
             x="dist_km",
             y="price_per_month",
             color="type",
-            labels={
-                "dist_km": "Distance to campus (km)",
-                "price_per_month": "Monthly rent (€)",
-            },
+            labels={"dist_km": "Distance to campus (km)", "price_per_month": "Monthly rent (€)"},
             color_discrete_sequence=px.colors.qualitative.Set2,
         )
         fig_scatter.update_layout(template="plotly_white")
         fig_downloads(fig_scatter, "Rent_vs_Distance")
-        st.plotly_chart(fig_scatter, use_container_width=True)
     else:
         st.info("No housing data to analyse with current filters.")
 
-# ----- Tab 3: Living costs + amenities -----
+# ----- TAB 3: LIVING COSTS + AMENITIES -----
 with tab3:
     st.header("Weekly living costs")
     st.markdown(
         "Basket items are built from canonical unit prices (1L milk, 1kg rice, 6 eggs, etc.) "
-        "and filtered so we compare like-for-like products only for bread, cheese, eggs, milk, "
-        "pasta and rice."
+        "and filtered so we compare like-for-like products only for bread, cheese, eggs, milk, pasta and rice."
     )
 
     if not df_food.empty:
@@ -684,21 +656,13 @@ with tab3:
                 ]
             ],
             column_config={
-                "Aldi price (€)": st.column_config.NumberColumn(
-                    "Aldi price (€)", format="€%.2f"
-                ),
-                "Tesco price (€)": st.column_config.NumberColumn(
-                    "Tesco price (€)", format="€%.2f"
-                ),
+                "Aldi price (€)": st.column_config.NumberColumn("Aldi price (€)", format="€%.2f"),
+                "Tesco price (€)": st.column_config.NumberColumn("Tesco price (€)", format="€%.2f"),
                 "Saving (Tesco – Aldi)": st.column_config.NumberColumn(
                     "Saving (Tesco – Aldi)", format="€%.2f"
                 ),
-                "Aldi €/unit": st.column_config.NumberColumn(
-                    "Aldi €/unit", format="€%.2f"
-                ),
-                "Tesco €/unit": st.column_config.NumberColumn(
-                    "Tesco €/unit", format="€%.2f"
-                ),
+                "Aldi €/unit": st.column_config.NumberColumn("Aldi €/unit", format="€%.2f"),
+                "Tesco €/unit": st.column_config.NumberColumn("Tesco €/unit", format="€%.2f"),
                 "aldi_link": st.column_config.LinkColumn("Aldi link"),
                 "tesco_link": st.column_config.LinkColumn("Tesco link"),
             },
@@ -723,7 +687,6 @@ with tab3:
         )
         fig_food.update_layout(xaxis_tickangle=-30, template="plotly_white")
         fig_downloads(fig_food, "Basket_Prices")
-        st.plotly_chart(fig_food, use_container_width=True)
     else:
         st.info("Food price data is not available.")
 
@@ -770,7 +733,6 @@ with tab3:
             )
             fig_counts.update_layout(xaxis_tickangle=-45, template="plotly_white")
             fig_downloads(fig_counts, "Amenity_Counts")
-            st.plotly_chart(fig_counts, use_container_width=True)
 
             nearby["maps_url"] = nearby.apply(
                 lambda r: f"https://www.google.com/maps/search/?api=1&query={r['lat']},{r['lon']}",
@@ -791,7 +753,6 @@ with tab3:
             )
             fig_am.update_layout(template="plotly_white")
             fig_downloads(fig_am, "Amenities_Map")
-            st.plotly_chart(fig_am, use_container_width=True)
         else:
             st.info(f"No amenities found within {radius} km of {selected_college}.")
     else:
@@ -800,8 +761,8 @@ with tab3:
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: grey;'>"
-    "<small>Data source: CSV fallbacks (daft_listings, food_prices, amenities). "
-    "Optional Postgres via PG_URL when available.</small>"
+    "<small>Data source: CSVs (daft_listings, food_prices, dublin_amenities)"
+    " with optional PostgreSQL backing when configured.</small>"
     "</div>",
     unsafe_allow_html=True,
 )
