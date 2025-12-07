@@ -1,0 +1,71 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: dublin_postgres
+    environment:
+      POSTGRES_DB: dublin_housing
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "15432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - dublin_net
+
+  mongo:
+    image: mongo:6
+    container_name: dublin_mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - dublin_net
+
+  dagster:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dagster
+    container_name: dublin_dagster
+    env_file:
+      - .env
+    volumes:
+      - ../dublin_housing_project:/app/dublin_housing_project
+      - ../orchestration:/app/orchestration
+      - ../data:/app/data
+    depends_on:
+      - postgres
+      - mongo
+    ports:
+      - "3000:3000"
+    networks:
+      - dublin_net
+
+  streamlit:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.streamlit
+    container_name: dublin_streamlit
+    env_file:
+      - .env
+    volumes:
+      - ../dublin_housing_project:/app/dublin_housing_project
+      - ../data:/app/data
+    depends_on:
+      - postgres
+      - mongo
+    ports:
+      - "8501:8501"
+    networks:
+      - dublin_net
+
+volumes:
+  pg_data:
+  mongo_data:
+
+networks:
+  dublin_net:
+    driver: bridge

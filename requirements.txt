@@ -1,0 +1,26 @@
+# core
+pandas
+numpy
+requests
+beautifulsoup4
+python-dotenv
+
+# db
+sqlalchemy
+psycopg2-binary
+pymongo
+
+# web / ui
+streamlit
+plotly
+kaleido
+
+# orchestration
+dagster
+dagster-webserver
+
+# scraping
+playwright
+
+# optional viz, etc
+pydeck

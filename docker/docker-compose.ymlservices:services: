@@ -1,0 +1,115 @@
+  postgres:
+    image: postgres:15
+    container_name: dublin_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dublin_housing
+    ports:
+      # Host 55432 -> Container 5432 (so it doesn't clash with your local Postgres)
+      - "55432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  mongo:
+    image: mongo:6
+    container_name: dublin_mongo
+    environment:
+      MONGO_INITDB_DATABASE: dublin_housing
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  dagster:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dagster
+    container_name: dublin_dagster
+    environment:
+      PG_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/dublin_housing
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DB: dublin_housing
+    depends_on:
+      - postgres
+      - mongo
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../orchestration:/app/orchestration
+      - ../dublin_housing_project:/app/dublin_housing_project
+
+  streamlit:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.streamlit
+    container_name: dublin_streamlit
+    environment:
+      PG_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/dublin_housing
+    depends_on:
+      - postgres
+    ports:
+      - "8501:8501"
+    volumes:
+      - ../dublin_housing_project:/app/dublin_housing_project
+
+volumes:
+  pg_data:
+  mongo_data:services:
+  postgres:
+  image: postgres:15
+  container_name: dublin_postgres
+  environment:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: dublin_housing
+    ports:
+    - "55432:5432"
+  volumes:
+    - pg_data:/var/lib/postgresql/data
+
+  mongo:
+    image: mongo:6
+    container_name: dublin_mongo
+    environment:
+      MONGO_INITDB_DATABASE: dublin_housing
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  dagster:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dagster
+    container_name: dublin_dagster
+    environment:
+      PG_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/dublin_housing
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DB: dublin_housing
+    depends_on:
+      - postgres
+      - mongo
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../orchestration:/app/orchestration
+      - ../dublin_housing_project:/app/dublin_housing_project
+
+  streamlit:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.streamlit
+    container_name: dublin_streamlit
+    environment:
+      PG_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/dublin_housing
+    depends_on:
+      - postgres
+    ports:
+      - "8501:8501"
+    volumes:
+      - ../dublin_housing_project:/app/dublin_housing_project
+
+volumes:
+  pg_data:
+  mongo_data:
