@@ -1,74 +1,73 @@
+# orchestration/pipeline.py
+
 import os
 from pathlib import Path
 
 import pandas as pd
 from dagster import (
-    Definitions,
-    ScheduleDefinition,
     asset,
+    Definitions,
     define_asset_job,
-)
-from sqlalchemy import create_engine
-
-# Paths in the container (copied in Dockerfile.dagster)
-DATA_DIR = Path("/app/data/raw")
-HOUSING_CSV = DATA_DIR / "daft_listings.csv"
-FOOD_CSV = DATA_DIR / "food_prices_aldi_tesco_fast.csv"
-AMENITIES_CSV = DATA_DIR / "dublin_amenities.csv"
-
-PG_URL = os.getenv(
-    "PG_URL",
-    "postgresql+psycopg2://postgres:postgres@postgres:5432/dublin_housing",
+    ScheduleDefinition,
 )
 
+# --- Paths inside the Docker containers ---
+# In both the dagster and streamlit images we copy local `data/` -> `/app/data`
+DATA_ROOT = Path("/app/data/raw")
 
-def get_engine():
-    return create_engine(PG_URL, pool_pre_ping=True)
-
-
-@asset
-def sync_csv_to_postgres(context):
-    """Load the three CSVs into Postgres (replace tables)."""
-    engine = get_engine()
-
-    tables = [
-        ("daft_listings", HOUSING_CSV),
-        ("food_prices", FOOD_CSV),
-        ("amenities", AMENITIES_CSV),
-    ]
-
-    for table_name, path in tables:
-        if not path.exists():
-            context.log.warning(f"CSV not found for {table_name}: {path}")
-            continue
-
-        context.log.info(f"Loading {table_name} from {path}")
-        df = pd.read_csv(path)
-
-        df.to_sql(
-            table_name,
-            engine,
-            if_exists="replace",
-            index=False,
-        )
-        context.log.info(f"Wrote {len(df)} rows to {table_name}")
-
-    return "ok"
+HOUSING_CSV = DATA_ROOT / "daft_listings.csv"
+FOOD_CSV = DATA_ROOT / "food_prices_aldi_tesco_fast.csv"
+AMENITIES_CSV = DATA_ROOT / "dublin_amenities.csv"
 
 
-# A job that just runs that asset
-sync_job = define_asset_job("sync_csv_job", selection=[sync_csv_to_postgres])
+# ---------- Assets ----------
+
+@asset(
+    name="daft_listings_csv",
+    description="Raw Daft listings scraped data from CSV.",
+)
+def daft_listings_csv() -> pd.DataFrame:
+    return pd.read_csv(HOUSING_CSV)
 
 
-# Run every night at 03:00 server time
-sync_schedule = ScheduleDefinition(
-    name="nightly_sync",
-    job=sync_job,
+@asset(
+    name="food_prices_csv",
+    description="Raw food price data (Aldi vs Tesco) from CSV.",
+)
+def food_prices_csv() -> pd.DataFrame:
+    return pd.read_csv(FOOD_CSV)
+
+
+@asset(
+    name="amenities_csv",
+    description="Dublin amenities dataset from CSV.",
+)
+def amenities_csv() -> pd.DataFrame:
+    return pd.read_csv(AMENITIES_CSV)
+
+
+# ---------- Jobs & schedules ----------
+
+# Simple asset job that materializes everything
+daily_refresh_job = define_asset_job(
+    name="daily_refresh_job",
+    selection="*",
+)
+
+# Run once per day at 03:00 UTC (adjust if you like)
+daily_refresh_schedule = ScheduleDefinition(
+    job=daily_refresh_job,
     cron_schedule="0 3 * * *",
 )
 
 
+# ---------- Definitions object (THIS is what Dagster expects) ----------
+
 defs = Definitions(
-    assets=[sync_csv_to_postgres],
-    schedules=[sync_schedule],
+    assets=[
+        daft_listings_csv,
+        food_prices_csv,
+        amenities_csv,
+    ],
+    schedules=[daily_refresh_schedule],
 )
