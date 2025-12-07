@@ -2,18 +2,18 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# System dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
     libpq-dev \
     chromium \
-    && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy application code
 COPY dublin_housing_project /app/dublin_housing_project
 COPY data /app/data
+
+ENV PYTHONPATH=/app
 
 CMD ["streamlit", "run", "dublin_housing_project/src/ui/streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0"]
