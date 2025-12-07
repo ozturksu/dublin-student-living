@@ -1,4 +1,2 @@
-# orchestration/__init__.py
-from .pipeline import defs
-
-__all__ = ["defs"]
+# orchestration package for Dagster.
+# Dagster loads `orchestration.pipeline:defs` directly via workspace.yaml.
